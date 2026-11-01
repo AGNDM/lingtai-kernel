@@ -192,3 +192,34 @@ jobs:
           PYTHONUTF8: "1"
         run: |
           python -m pytest -q tests/test_shell_pr1_contract.py tests/test_shell_windows_native.py tests/test_windows_taskkill_fallback.py tests/test_windows_regression.py tests/test_powershell_decode_windows_output.py
+
+  flake-check:
+    name: Flake check test_daemon_process_port concurrent sweep (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+          - label: fix
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.label == 'base' && env.BASE_SHA || env.FIX_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install kernel with dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          python -m pip install --disable-pip-version-check -e .
+      - name: Run the test 40 times
+        run: |
+          fails=0
+          for i in $(seq 1 40); do
+            python -m pytest -q -p no:cacheprovider \
+              "tests/test_daemon_process_port.py::test_group_and_all_sweeps_survive_concurrent_terminal_release" \
+              >/dev/null 2>&1 || fails=$((fails+1))
+          done
+          echo "${{ matrix.label }}: $fails/40 failed"
