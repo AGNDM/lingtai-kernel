@@ -1,0 +1,194 @@
+# Fork-only verification for fix/claude-code-per-session-prompt-file.
+# Upstream's test workflows only trigger on `release: published`, so this
+# workflow runs the same jobs on push, plus the full suite on Linux for both
+# the upstream base and the fix so pre-existing failures are not blamed on it.
+name: Verify claude-code prompt-file fix
+
+on:
+  push:
+    branches: [ci/verify-claude-code-fix]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BASE_SHA: 293fed53160bb887db8ab5116bb3d62849e20fc5
+  FIX_REF: fix/claude-code-per-session-prompt-file
+
+jobs:
+  linux-full-suite:
+    name: Linux / full suite (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+          - label: fix
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.label == 'base' && env.BASE_SHA || env.FIX_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install kernel with dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          python -m pip install --disable-pip-version-check -e .
+      - name: Record checked-out commit
+        run: git rev-parse HEAD | tee commit.txt
+      - name: Run full test suite
+        continue-on-error: true
+        run: python -m pytest -q -p no:cacheprovider --junitxml=junit.xml -o junit_family=xunit2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ matrix.label }}
+          path: |
+            junit.xml
+            commit.txt
+
+  compare:
+    name: No new failures vs base
+    needs: linux-full-suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - name: Compare failing tests
+        run: |
+          python3 - <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          def results(path):
+              out = {}
+              for tc in ET.parse(path).getroot().iter("testcase"):
+                  name = f"{tc.get('classname')}::{tc.get('name')}"
+                  bad = any(c.tag in ("failure", "error") for c in tc)
+                  skipped = any(c.tag == "skipped" for c in tc)
+                  out[name] = "fail" if bad else ("skip" if skipped else "pass")
+              return out
+          base, fix = results("junit-base/junit.xml"), results("junit-fix/junit.xml")
+          for label, r in (("base", base), ("fix", fix)):
+              commit = open(f"junit-{label}/commit.txt").read().strip()
+              counts = {k: sum(v == k for v in r.values()) for k in ("pass", "fail", "skip")}
+              print(f"{label} {commit[:10]}: {counts}")
+          new = sorted(t for t, v in fix.items() if v == "fail" and base.get(t) != "fail")
+          fixed = sorted(t for t, v in base.items() if v == "fail" and fix.get(t) == "pass")
+          ours = {t: v for t, v in fix.items() if "test_claude_code_session_prompt_file" in t}
+          print("new regression test results:", ours)
+          print("failures fixed by the change:", fixed or "none")
+          if new:
+              print("NEW FAILURES introduced by the fix:"); print("\n".join(new)); sys.exit(1)
+          if not ours or any(v != "pass" for v in ours.values()):
+              print("regression test did not pass"); sys.exit(1)
+          print("OK: no new failures; regression test passes")
+          EOF
+
+  native-macos-smoke:
+    name: Native macOS / smoke tier (upstream job, fix ref)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FIX_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install kernel with dependencies
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          python -m pip install --disable-pip-version-check -e .
+      - name: Run macOS smoke tier
+        run: |
+          python -m pytest -q \
+            tests/test_shell_pr1_contract.py \
+            tests/test_bash_shell_dialect.py \
+            tests/test_shell_kind_classifier.py \
+            tests/test_shell_kind_spawn_args.py \
+            tests/test_process_identity.py \
+            tests/test_daemon_process_port.py \
+            tests/test_daemon_detached_supervisor.py \
+            tests/test_token_ledger.py \
+            tests/test_workdir_lease_posix_only.py \
+            tests/test_portable_adapter_encoding.py \
+            tests/test_claude_code_session_prompt_file.py
+
+  native-windows-kernel:
+    name: Native Windows / kernel lifecycle (upstream job, fix ref)
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FIX_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install kernel with dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          python -m pip install --disable-pip-version-check -e .
+      - name: Run Windows kernel contract tiers
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python -m pytest -q `
+            tests/test_windows_import_graph.py `
+            tests/test_workdir_lease.py `
+            tests/test_workdir_lease_posix_only.py `
+            tests/test_refresh_watcher_windows.py `
+            tests/test_process_scan.py `
+            tests/test_process_match.py `
+            tests/test_portable_adapter_encoding.py `
+            tests/test_agent_presence.py `
+            tests/test_notification_store.py `
+            tests/test_daemon_attention_delay.py `
+            tests/test_mail_transport.py `
+            tests/test_kernel_migrate.py `
+            tests/test_git_init.py `
+            tests/test_daemon_windows_lock.py `
+            tests/test_daemon_windows_process_port.py `
+            tests/test_daemon_windows_supervisor.py `
+            tests/test_avatar_launcher_windows.py
+      - name: Run native lifecycle smoke
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python -m pytest -q `
+            tests/test_agent.py `
+            tests/test_lifecycle_daemon_shutdown.py
+
+  native-windows-shell:
+    name: Native Windows / PowerShell 7 (upstream job, fix ref)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.FIX_REF }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify PowerShell 7
+        shell: pwsh
+        run: |
+          if ($PSVersionTable.PSVersion.Major -lt 7) {
+            throw "PowerShell 7 is required"
+          }
+          pwsh -NoLogo -NoProfile -NonInteractive -Command '$PSVersionTable.PSVersion.ToString()'
+      - name: Install focused test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pytest
+          python -m pip install --disable-pip-version-check --no-deps -e .
+      - name: Run shell PR1 contract
+        shell: pwsh
+        env:
+          PYTHONUTF8: "1"
+        run: |
+          python -m pytest -q tests/test_shell_pr1_contract.py tests/test_shell_windows_native.py tests/test_windows_taskkill_fallback.py tests/test_windows_regression.py tests/test_powershell_decode_windows_output.py
